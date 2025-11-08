@@ -1,66 +1,90 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-} -- ĐÃ THÊM
 module Main where
 
 import Types
 import Controller
-import UI
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (forever, void)
+import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
-import Control.Concurrent.STM (TVar, newTVarIO, writeTVarIO)
-import Brick
-import Brick.BChan (newBChan, writeBChan)
-import qualified Graphics.Vty as V
-import Control.Monad (void, forever)
-import qualified Data.Map.Strict as Map
+import qualified Data.Map.Strict as Map -- ĐÃ SỬA: Thêm import Map
+import qualified Network.Wai as Wai
+import qualified Network.Wai.Handler.Warp as Warp
+import qualified Network.Wai.Handler.WebSockets as WaiWS
+import qualified Network.WebSockets as WS
+import Data.Aeson (encode, decode)
+import Control.Exception (finally)
+import Network.HTTP.Types.Status (status400) -- ĐÃ SỬA: Thêm import status400
 
 main :: IO ()
 main = do
-  -- 1. Khởi tạo Kênh (Channels)
-  priceTChan <- newTChanIO -- Kênh giá (Generators -> Dispatcher)
-  orderTChan <- newTChanIO -- Kênh lệnh (UI -> Controller)
-  bchan <- newBChan 1000    -- Kênh sự kiện của Brick (Dispatcher -> UI)
+  putStrLn "Starting stock simulator server on ws://127.0.0.1:9160"
 
-  -- 2. Khởi tạo Trạng thái (State)
+  -- 1. Khởi tạo State và Channels
   stocksList <- initialStocks
   let stockMap = Map.fromList $ map (\s -> (sId s, s)) stocksList
-
-  tvStocks <- newTVarIO stockMap    -- Snapshot giá cổ phiếu
-  pVar <- newTVarIO initialPortfolio -- Danh mục đầu tư
-  tradeLog <- newTVarIO []         -- Lịch sử giao dịch
-
-  -- 3. Khởi chạy các Threads "Backend"
   
-  -- Shutdown TVar to signal threads to exit cleanly
-  shutdown <- newTVarIO False
+  tvStocks <- newTVarIO stockMap
+  pVar <- newTVarIO initialPortfolio
+  tradeLog <- newTVarIO []
+  
+  orderChan <- newTChanIO :: IO (TChan ClientMessage)
+  priceChan <- newTChanIO :: IO (TChan PriceEvent)
+  
+  -- 2. Khởi chạy các Threads "Backend"
+  mapM_ (void . forkIO . priceGenerator priceChan) stocksList
+  void $ forkIO $ controllerLoop orderChan pVar tradeLog tvStocks
+  
+  -- 3. Khởi chạy Máy chủ WebSocket
+  Warp.run 9160 $ WaiWS.websocketsOr WS.defaultConnectionOptions
+    (webSocketApp priceChan orderChan pVar tradeLog tvStocks)
+    httpApp
 
-  -- Chạy các price generators (mỗi cổ phiếu 1 thread)
-  mapM_ (\s -> void $ forkIO (priceGenerator shutdown priceTChan s)) stocksList
+-- Xử lý các kết nối WebSocket
+-- ĐÃ SỬA: Sửa 'Map' thành 'Map.Map'
+webSocketApp :: TChan PriceEvent -> TChan ClientMessage -> TVar Portfolio -> TVar [Trade] -> TVar (Map.Map StockId Stock) -> WS.ServerApp
+webSocketApp priceChan orderChan pVar tradeLog tvStocks pending = do
+  conn <- WS.acceptRequest pending
+  
+  priceChanDup <- atomically $ dupTChan priceChan
+  
+  putStrLn "Client connected"
 
-  -- Chạy dispatcher (đọc từ priceTChan, cập nhật tvStocks, ghi vào bchan)
-  void $ forkIO $ dispatcher priceTChan bchan tvStocks
+  -- Gửi trạng thái ban đầu cho client
+  sendInitialState conn
+  
+  let sendUpdates = forever $ do
+        priceEv <- atomically $ readTChan priceChanDup
+        atomically $ modifyTVar' tvStocks $ Map.adjust (\s -> s { sPrice = pePrice priceEv }) (peStock priceEv)
+        WS.sendTextData conn $ encode (PriceUpdate priceEv)
+        
+        p <- readTVarIO pVar
+        t <- readTVarIO tradeLog
+        WS.sendTextData conn $ encode (PortfolioUpdate p)
+        WS.sendTextData conn $ encode (TradeLogUpdate t)
+        
+  let receiveOrders = forever $ do
+        msg <- WS.receiveData conn
+        case decode msg of
+          Just (orderMsg :: ClientMessage) -> do -- Đã thêm kiểu tường minh
+            putStrLn $ "Received order: " ++ show orderMsg
+            atomically $ writeTChan orderChan orderMsg
+          Nothing -> putStrLn "Received invalid message"
 
-  -- Chạy controller (đọc từ orderTChan, xử lý lệnh)
-  void $ forkIO $ controllerLoop orderTChan pVar tradeLog tvStocks
+  (void $ forkIO sendUpdates) `finally` (receiveOrders `finally` putStrLn "Client disconnected")
+  
+  where
+    sendInitialState conn = do
+      s <- readTVarIO tvStocks
+      p <- readTVarIO pVar
+      t <- readTVarIO tradeLog
+      WS.sendTextData conn $ encode (FullStockUpdate s)
+      WS.sendTextData conn $ encode (PortfolioUpdate p)
+      WS.sendTextData conn $ encode (TradeLogUpdate t)
 
-  -- 4. Khởi tạo Trạng thái UI ban đầu
-  initStocksSnapshot <- readTVarIO tvStocks
-  initPortfolio <- readTVarIO pVar
-  initTrades <- readTVarIO tradeLog
-  let ui0 = UiState initStocksSnapshot 0 initPortfolio initTrades ById
-
-  -- 5. Chạy Thread "Tick" cho UI
-  -- Thread này định kỳ gửi sự kiện ETick để UI refresh portfolio và trades
-  void $ forkIO $ forever $ do
-    threadDelay 500000 -- 0.5 giây
-    writeBChan bchan ETick
-
-  -- 6. Chạy Brick UI
-  let buildVty = V.mkVty V.defaultConfig
-  initialVty <- buildVty
-  _finalState <- customMain initialVty buildVty (Just bchan) (app orderTChan pVar tradeLog) ui0
-
-  -- Signal shutdown to background threads and give them a moment to exit
-  writeTVarIO shutdown True
-  threadDelay 200000
-
-  putStrLn "Exiting..."
+-- Ứng dụng HTTP dự phòng
+httpApp :: Wai.Application
+httpApp _ respond = respond $ Wai.responseLBS
+    status400 -- ĐÃ SỬA: Bỏ 'Wai.'
+    [("Content-Type", "text/plain")]
+    "This is a WebSocket server. Please connect using a WebSocket client."

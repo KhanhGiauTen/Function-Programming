@@ -3,7 +3,6 @@ module Controller
   , initialPortfolio
   , stepPrice
   , priceGenerator
-  , dispatcher
   , applyOrderSTM
   , controllerLoop
   ) where
@@ -15,8 +14,8 @@ import Control.Monad (forever)
 import System.Random (randomRIO)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Time.Clock (getCurrentTime)
-import Brick.BChan (BChan, writeBChan) -- Cần import BChan
+import Data.Time.Clock (getCurrentTime, UTCTime)
+-- DÒNG BỊ LỖI 'import Brick.BChan' ĐÃ ĐƯỢC XÓA
 
 -- ========== Config & Init ==========
 
@@ -40,84 +39,95 @@ stepPrice vol trend p = do
       p' = p * (1.0 + delta)
   pure $ max 0.01 p'
 
--- priceGenerator now respects a shutdown TVar; when shutdown becomes True it exits
-priceGenerator :: TVar Bool -> TChan PriceEvent -> Stock -> IO ()
-priceGenerator shutdown outChan stock0 = do
+priceGenerator :: TChan PriceEvent -> Stock -> IO ()
+priceGenerator outChan stock0 = do
   let sid = sId stock0
       loop sprice = do
-        shouldStop <- readTVarIO shutdown
-        if shouldStop
-          then pure ()
-          else do
-            now <- getCurrentTime
-            p' <- stepPrice (sVolatility stock0) (sTrend stock0) sprice
-            let pe = PriceEvent sid p' now
-            atomically $ putTChan outChan pe
-            n <- randomRIO (200000, 800000) -- sleep 200-800ms
-            threadDelay n
-            loop p'
+        now <- getCurrentTime
+        p' <- stepPrice (sVolatility stock0) (sTrend stock0) sprice
+        let pe = PriceEvent sid p' now
+        atomically $ writeTChan outChan pe
+        n <- randomRIO (200000, 800000) -- sleep 200-800ms
+        threadDelay n
+        loop p'
   loop (sPrice stock0)
-
--- dispatcher: read from price TChan -> update tvStocks -> write to bchan
-dispatcher :: TChan PriceEvent -> BChan AppEvent -> TVar (Map StockId Stock) -> IO ()
-dispatcher tchan bchan tvStocks = forever $ do
-  pe <- atomically $ readTChan tchan
-  let sid = peStock pe
-      p = pePrice pe
-  -- Cập nhật snapshot
-  atomically $ modifyTVar' tvStocks $ Map.adjust (\s -> s { sPrice = p }) sid
-  -- Gửi cho UI
-  writeBChan bchan (EPrice pe)
 
 -- ========== Controller: process Orders ==========
 
-applyOrderSTM :: TVar Portfolio -> Map StockId Stock -> Order -> STM (Either String Trade)
-applyOrderSTM pVar _snap ord = do -- _snap không được dùng, nhưng giữ để tương thích
-  p <- readTVar pVar
-  let curPrice = oPrice ord
-      total = realToFrac (oQty ord) * curPrice
-  case oType ord of
-    Buy -> if cash p >= total
-           then do
-             let newCash = cash p - total
-                 h = Map.insertWith (+) (oStock ord) (oQty ord) (holdings p)
-                 trade = Trade (oStock ord) (oQty ord) curPrice (oTime ord) Buy
-             writeTVar pVar (Portfolio newCash h)
-             pure (Right trade)
-           else pure (Left "Insufficient cash")
-    Sell -> let curHold = Map.findWithDefault 0 (oStock ord) (holdings p)
-            in if curHold >= oQty ord
-               then do
-                 let newHold = curHold - oQty ord
-                     h' = if newHold == 0 then Map.delete (oStock ord) (holdings p) else Map.insert (oStock ord) newHold (holdings p)
-                     newCash = cash p + total
-                     trade = Trade (oStock ord) (oQty ord) curPrice (oTime ord) Sell
-                 writeTVar pVar (Portfolio newCash h')
-                 pure (Right trade)
-               else pure (Left "Insufficient holdings")
+-- --- BẮT ĐẦU THAY ĐỔI LỚN ---
 
--- controller loop reads Orders from TChan and applies them
-controllerLoop :: TChan Order -> TVar Portfolio -> TVar [Trade] -> TVar (Map StockId Stock) -> IO ()
-controllerLoop orderChan pVar tradeLog tvStocks = forever $ do
-  -- Chờ lệnh từ UI
-  ord <- atomically $ readTChan orderChan
+-- Dùng ClientMessage thay vì Order
+applyOrderSTM :: TVar Portfolio -> Map StockId Stock -> ClientMessage -> UTCTime -> STM (Either String Trade)
+applyOrderSTM pVar snap msg time = do
+  p <- readTVar pVar
   
-  -- Lấy giá thị trường hiện tại từ snapshot
+  case Map.lookup (oStock msg) snap of
+    Nothing -> pure (Left "Unknown stock")
+    Just stock -> do
+      let curPrice = sPrice stock
+          orderQty = oQty msg
+          totalCost = realToFrac orderQty * curPrice
+          stockId = oStock msg
+
+      case oType msg of
+        Buy -> if cash p >= totalCost
+               then do
+                 let newCash = cash p - totalCost
+                 
+                 -- Tính toán giá vốn trung bình mới
+                 let oldHolding = Map.findWithDefault (HoldingData 0 0) stockId (holdings p)
+                     oldQty = hQty oldHolding
+                     oldAvgCost = hAvgCost oldHolding
+                     
+                     newTotalQty = oldQty + orderQty
+                     -- Tính giá trị tổng mới (total value)
+                     newTotalValue = (fromIntegral oldQty * oldAvgCost) + (fromIntegral orderQty * curPrice)
+                     -- Tính giá trung bình mới
+                     newAvgCost = if newTotalQty == 0 then 0 else newTotalValue / fromIntegral newTotalQty
+                     
+                     newHoldings = Map.insert stockId (HoldingData newTotalQty newAvgCost) (holdings p)
+                     trade = Trade stockId orderQty curPrice time Buy
+                     
+                 writeTVar pVar (Portfolio newCash newHoldings)
+                 pure (Right trade)
+               else pure (Left "Insufficient cash")
+               
+        Sell -> do
+          let oldHolding = Map.findWithDefault (HoldingData 0 0) stockId (holdings p)
+              oldQty = hQty oldHolding
+
+          if oldQty >= orderQty
+             then do
+               let newCash = cash p + totalCost
+                   newTotalQty = oldQty - orderQty
+                   
+                   -- Khi bán, giá vốn trung bình không đổi
+                   newAvgCost = if newTotalQty == 0 then 0 else hAvgCost oldHolding
+                   
+                   -- Cập nhật hoặc xóa cổ phiếu khỏi danh mục
+                   newHoldings = if newTotalQty == 0
+                                 then Map.delete stockId (holdings p)
+                                 else Map.insert stockId (HoldingData newTotalQty newAvgCost) (holdings p)
+                                 
+                   trade = Trade stockId orderQty curPrice time Sell
+                   
+               writeTVar pVar (Portfolio newCash newHoldings)
+               pure (Right trade)
+             else pure (Left "Insufficient holdings")
+
+-- --- KẾT THÚC THAY ĐỔI LỚN ---
+
+-- Controller loop đọc từ TChan ClientMessage (thay vì Order)
+controllerLoop :: TChan ClientMessage -> TVar Portfolio -> TVar [Trade] -> TVar (Map StockId Stock) -> IO ()
+controllerLoop orderChan pVar tradeLog tvStocks = forever $ do
+  msg <- atomically $ readTChan orderChan
   snap <- readTVarIO tvStocks
   now <- getCurrentTime
   
-  case Map.lookup (oStock ord) snap of
-    Nothing -> putStrLn $ "Unknown stock in order: " ++ oStock ord
-    Just stock -> do
-      -- Tạo lệnh hoàn chỉnh với giá và thời gian (giả sử là lệnh thị trường)
-      let fullOrd = ord { oPrice = sPrice stock, oTime = now }
-      
-      -- Thực thi lệnh trong STM
-      res <- atomically $ applyOrderSTM pVar snap fullOrd
-      
-      case res of
-        Left err -> putStrLn $ "Order failed: " ++ err
-        Right trade -> do
-          putStrLn $ "Executed trade: " ++ show trade
-          -- Cập nhật trade log
-          atomically $ modifyTVar' tradeLog (take 50 . (trade:))
+  res <- atomically $ applyOrderSTM pVar snap msg now
+  
+  case res of
+    Left err -> putStrLn $ "Order failed: " ++ err
+    Right trade -> do
+      putStrLn $ "Executed trade: " ++ show trade
+      atomically $ modifyTVar' tradeLog (take 50 . (trade:))

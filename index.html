@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Haskell Stock Sim (Binance UI)</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --bg-secondary: #1e1e1e;
+            --border-color: #333;
+            --text-color: #f0f0f0;
+            --text-secondary: #888;
+            --color-green: #00b15d;
+            --color-red: #f15b4e;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            padding: 16px;
+            margin: 0;
+            overflow-y: hidden; /* Ngăn cuộn trang chính */
+        }
+
+        .grid-container {
+            display: grid;
+            grid-template-columns: 280px 1fr 320px; /* 3 cột: Left, Middle, Right */
+            grid-template-rows: calc(100vh - 32px); /* Cao tối đa */
+            gap: 16px;
+        }
+
+        .panel {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .panel-title {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+            font-weight: bold;
+            margin: 0;
+        }
+
+        .panel-content {
+            padding: 16px;
+            overflow-y: auto; /* Cho phép cuộn bên trong panel */
+        }
+        
+        .panel-content-no-pad {
+            overflow-y: auto;
+        }
+
+        /* Cột giữa - Market */
+        #market-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #market-table th, #market-table td {
+            padding: 10px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        #market-table th {
+            color: var(--text-secondary);
+            font-size: 0.9em;
+        }
+        #market-table td:nth-child(2) {
+            font-weight: bold;
+        }
+
+        /* Cột phải - Order Book & Trades */
+        .order-book-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .order-book-table td {
+            padding: 4px 16px;
+            font-size: 0.9em;
+        }
+        .order-book-table .price { font-weight: bold; }
+        .order-book-table .bid .price { color: var(--color-green); }
+        .order-book-table .ask .price { color: var(--color-red); }
+
+        #trades-list p {
+            padding: 4px 16px;
+            margin: 0;
+            font-size: 0.9em;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        /* Cột trái - Order Form & Portfolio */
+        .form-group {
+            margin-bottom: 16px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+            color: var(--text-secondary);
+        }
+        .form-group select, .form-group input {
+            width: 100%;
+            padding: 10px;
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            border-radius: 4px;
+            box-sizing: border-box; /* Quan trọng */
+        }
+        
+        .form-button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        #btn-buy {
+            background-color: var(--color-green);
+            color: white;
+        }
+        #btn-sell {
+            background-color: var(--color-red);
+            color: white;
+            margin-top: 10px;
+        }
+
+        #portfolio-cash {
+            font-size: 1.3em;
+            font-weight: bold;
+            margin-bottom: 16px;
+        }
+        #holdings-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #holdings-table th, #holdings-table td {
+            padding: 8px 0;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.9em;
+        }
+        /* --- THÊM CSS CHO LỜI/LỖ --- */
+        .pl-green { color: var(--color-green); }
+        .pl-red { color: var(--color-red); }
+
+    </style>
+</head>
+<body>
+
+    <div class="grid-container">
+        <!-- Cột trái: Order Form & Portfolio -->
+        <div class="left-column">
+            <div class="panel" style="flex: 1.5;">
+                <h2 class="panel-title">Place Order</h2>
+                <div class="panel-content">
+                    <div class="form-group">
+                        <label for="stock-select">Stock</label>
+                        <select id="stock-select">
+                            <!-- JS sẽ điền vào đây -->
+                        </select>
+                    </div>
+                    
+                    <!-- === BẮT ĐẦU SỬA LỖI === -->
+                    <!-- XÓA BỎ MỤC "TYPE" BỊ DƯ THỪA -->
+                    <!-- 
+                    <div class="form-group">
+                        <label for="order-type">Type</label>
+                        <select id="order-type">
+                            <option value="Buy">Buy</option>
+                            <option value="Sell">Sell</option>
+                        </select>
+                    </div>
+                    -->
+                    <!-- === KẾT THÚC SỬA LỖI === -->
+
+                    <div class="form-group">
+                        <label for="order-qty">Quantity</label>
+                        <input type="number" id="order-qty" value="1" min="1">
+                    </div>
+                    <button id="btn-buy" class="form-button" onclick="sendOrder('Buy')">Buy</button>
+                    <button id="btn-sell" class="form-button" onclick="sendOrder('Sell')">Sell</button>
+                </div>
+            </div>
+            <div class="panel" style="flex: 1; margin-top: 16px;">
+                <h2 class="panel-title">Portfolio</h2>
+                <div class="panel-content">
+                    <div id="portfolio-cash">Cash: $10000.00</div>
+                    <!-- THAY ĐỔI BẢNG PORTFOLIO -->
+                    <table id="holdings-table">
+                        <thead id="holdings-header">
+                            <tr><th>ID</th><th>Shares</th><th>Avg. Cost</th><th>Market</th><th>P/L</th></tr>
+                        </thead>
+                        <tbody id="holdings-body"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cột giữa: Market List (Thay thế biểu đồ) -->
+        <div class="panel">
+            <h2 class="panel-title">Market</h2>
+            <div class="panel-content-no-pad">
+                <table id="market-table">
+                    <thead><tr><th>ID</th><th>Price</th><th>Volatility</th><th>Trend</th></tr></thead>
+                    <tbody>
+                        <!-- JS sẽ điền vào đây -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Cột phải: Order Book & Trades -->
+        <div class="right-column">
+            <div class="panel" style="flex: 1.5;">
+                <h2 class="panel-title">Order Book (Mock)</h2>
+                <div class="panel-content-no-pad">
+                    <table class="order-book-table">
+                        <thead><tr><th>Price (USD)</th><th>Amount</th></tr></thead>
+                        <tbody id="order-book-asks">
+                            <!-- Asks (Sell) - Red -->
+                        </tbody>
+                    </table>
+                    <h3 id="order-book-current-price" style="text-align: center; padding: 10px; margin: 0; border-top: 1px solid var(--border-color); border-bottom: 1px solid var(--border-color); font-size: 1.2em;">
+                        100.00
+                    </h3>
+                    <table class="order-book-table">
+                        <tbody id="order-book-bids">
+                            <!-- Bids (Buy) - Green -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="panel" style="flex: 1; margin-top: 16px;">
+                <h2 class="panel-title">Recent Trades</h2>
+                <div class="panel-content-no-pad" id="trades-list">
+                    <!-- JS sẽ điền vào đây -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // const wsUrl = window.location.host.replace('8000', '9160');
+        // const ws = new WebSocket(`wss://${wsUrl}`);
+
+        // SỬA LỖI: Kết nối trực tiếp tới server.
+        // Logic ở trên bị lỗi vì window.location.host không chứa port 8000
+        // hoặc khi chạy file cục bộ (file://)
+        // Dùng 'ws://' (insecure) vì server Haskell không chạy SSL.
+        // const ws = new WebSocket("ws://127.0.0.1:9160");
+
+        // --- KHÔI PHỤC LOGIC TỰ ĐỘNG TÌM URL CHO CODESPACES ---
+        // 1. Lấy host của trang web hiện tại (ví dụ: my-space-123-8000.app.github.dev)
+        const currentHost = window.location.host;
+        // 2. Thay thế cổng 8000 (của web) bằng cổng 9160 (của Haskell)
+        const wsHost = currentHost.replace('8000', '9160');
+        // 3. Sử dụng 'wss://' (WebSocket Secure) vì Codespaces phục vụ qua HTTPS
+        const wsUrl = `wss://${wsHost}`;
+        
+        console.log(`Connecting to WebSocket at: ${wsUrl}`);
+        const ws = new WebSocket(wsUrl);
+        // --- KẾT THÚC SỬA LỖI ---
+
+
+        // DOM Elements
+        const marketBody = document.querySelector("#market-table tbody");
+        const stockSelect = document.querySelector("#stock-select");
+        const cashDiv = document.querySelector("#portfolio-cash");
+        // --- THÊM BIẾN DOM MỚI ---
+        const holdingsHeader = document.querySelector("#holdings-header");
+        const holdingsBody = document.querySelector("#holdings-body");
+        // --- KẾT THÚC THÊM BIẾN ---
+        const tradesList = document.querySelector("#trades-list");
+        const orderBookAsks = document.querySelector("#order-book-asks");
+        const orderBookBids = document.querySelector("#order-book-bids");
+        const orderBookPrice = document.querySelector("#order-book-current-price");
+
+        let stockState = {};
+        let focusedStockId = "AAA"; // Mặc định theo dõi 'AAA' cho sổ lệnh
+
+        ws.onopen = () => console.log("Connected to Haskell server");
+
+        // === BẮT ĐẦU SỬA LỖI ===
+        // PHỤC HỒI HÀM ws.onmessage BỊ HỎNG
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            let tag, data;
+            
+            // Backend (generic ToJSON) gửi 'tag' và 'contents'
+            // Backend (ToJSON thủ công) gửi { "TagName": data }
+            if (msg.tag) {
+                tag = msg.tag;
+                data = msg.contents;
+            } else {
+                tag = Object.keys(msg)[0]; // Lấy "PriceUpdate", "PortfolioUpdate" v.v.
+                data = msg[tag];
+            }
+
+            // Phục hồi khối SWITCH
+            switch (tag) {
+                case "FullStockUpdate":
+                    stockState = data; // Cập nhật state
+                    updateStockTable(stockState);
+                    updateStockSelector(stockState);
+                    updatePortfolioDisplay(); // Cập nhật P/L dựa trên giá mới
+                    // Cập nhật sổ lệnh giả lập
+                    if (stockState[focusedStockId]) {
+                        updateMockOrderBook(stockState[focusedStockId].sPrice);
+                    }
+                    break;
+                case "PriceUpdate":
+                    updateStockPrice(data);
+                    // Cập nhật sổ lệnh giả lập nếu là cổ phiếu đang xem
+                    if (data.peStock === focusedStockId) {
+                        updateMockOrderBook(data.pePrice);
+                    }
+                    break;
+                case "PortfolioUpdate":
+                    // Bây giờ chúng ta lưu portfolio vào state
+                    portfolioState = data;
+                    updatePortfolioDisplay(); // Cập nhật toàn bộ bảng portfolio
+                    break;
+                case "TradeLogUpdate":
+                    updateTradeLog(data);
+                    break;
+            }
+        };
+        // === KẾT THÚC SỬA LỖI ===
+
+
+        function updateStockTable(stocks) {
+            stockState = stocks;
+            marketBody.innerHTML = "";
+            const sortedIds = Object.keys(stocks).sort();
+            
+            sortedIds.forEach(id => {
+                const stock = stocks[id];
+                const row = document.createElement("tr");
+                row.id = `stock-${id}`;
+                row.innerHTML = `
+                    <td>${id}</td>
+                    <td>${stock.sPrice.toFixed(2)}</td>
+                    <td>${stock.sVolatility}</td>
+                    <td>${stock.sTrend}</td>
+                `;
+                marketBody.appendChild(row);
+            });
+        }
+
+        function updateStockSelector(stocks) {
+            stockSelect.innerHTML = "";
+            Object.keys(stocks).sort().forEach(id => {
+                const option = document.createElement("option");
+                option.value = id;
+                option.textContent = id;
+                stockSelect.appendChild(option);
+            });
+        }
+
+        // --- THAY ĐỔI LỚN: TÁCH LOGIC CẬP NHẬT PORTFOLIO ---
+        let portfolioState = { cash: 10000.0, holdings: {} };
+
+        // Hàm này chỉ cập nhật DOM từ state, không nhận dữ liệu qua message
+        function updatePortfolioDisplay() {
+            cashDiv.textContent = `Cash: $${portfolioState.cash.toFixed(2)}`;
+            holdingsBody.innerHTML = ""; // Xóa nội dung cũ
+            
+            if (Object.keys(portfolioState.holdings).length === 0) {
+                 holdingsHeader.innerHTML = "<tr><th>ID</th><th>Shares</th></tr>"; // Quay về header cũ nếu không có gì
+                 holdingsBody.innerHTML = "<tr><td colspan='2' style='color: var(--text-secondary);'>No holdings</td></tr>";
+                 return;
+            }
+
+            // Đặt header mới nếu có holdings
+            holdingsHeader.innerHTML = "<tr><th>ID</th><th>Shares</th><th>Avg. Cost</th><th>Market</th><th>P/L</th></tr>";
+            
+            const sortedHoldings = Object.keys(portfolioState.holdings).sort();
+            
+            sortedHoldings.forEach(id => {
+                const holding = portfolioState.holdings[id]; // { hQty: 21, hAvgCost: 95.50 }
+                const currentStock = stockState[id]; // Lấy giá thị trường từ state
+                const currentPrice = currentStock ? currentStock.sPrice : 0;
+                
+                const unrealizedPL = (currentPrice - holding.hAvgCost) * holding.hQty;
+                
+                const plClass = unrealizedPL > 0 ? 'pl-green' : (unrealizedPL < 0 ? 'pl-red' : '');
+                
+                const row = document.createElement("tr");
+                row.id = `portfolio-${id}`; // Thêm ID để cập nhật P/L
+                row.innerHTML = `
+                    <td>${id}</td>
+                    <td>${holding.hQty}</td>
+                    <td>${holding.hAvgCost.toFixed(2)}</td>
+                    <td classs="market-price">${currentPrice.toFixed(2)}</td>
+                    <td class="pl ${plClass}">${unrealizedPL.toFixed(2)}</td>
+                `;
+                holdingsBody.appendChild(row);
+            });
+        }
+
+        // Cập nhật P/L trong portfolio khi giá thay đổi
+        function updatePortfolioStockPrice(stockId, newPrice) {
+            const row = document.getElementById(`portfolio-${stockId}`);
+            // Chỉ cập nhật nếu hàng đó tồn tại VÀ chúng ta thực sự đang nắm giữ cổ phiếu đó
+            if (row && portfolioState.holdings[stockId]) {
+                const holding = portfolioState.holdings[stockId];
+                const unrealizedPL = (newPrice - holding.hAvgCost) * holding.hQty;
+                const plClass = unrealizedPL > 0 ? 'pl-green' : (unrealizedPL < 0 ? 'pl-red' : '');
+
+                row.cells[3].textContent = newPrice.toFixed(2); // Cập nhật giá Market
+                const plCell = row.cells[4];
+                plCell.textContent = unrealizedPL.toFixed(2); // Cập nhật P/L
+                plCell.className = `pl ${plClass}`;
+            }
+        }
+
+        // Sửa lại hàm 'updateStockPrice' để gọi hàm cập nhật P/L
+        function updateStockPrice(priceEvent) {
+            // 1. Cập nhật bảng Market
+            const row = document.getElementById(`stock-${priceEvent.peStock}`);
+            if (row) {
+                const cell = row.cells[1];
+                cell.textContent = priceEvent.pePrice.toFixed(2);
+                cell.style.color = 'var(--color-green)';
+                setTimeout(() => { cell.style.color = 'var(--text-color)'; }, 500);
+            }
+            
+            // 2. Cập nhật state toàn cục
+            if (stockState[priceEvent.peStock]) {
+                 stockState[priceEvent.peStock].sPrice = priceEvent.pePrice;
+            }
+
+            // 3. Cập nhật P/L trong bảng Portfolio
+            updatePortfolioStockPrice(priceEvent.peStock, priceEvent.pePrice);
+        }
+        
+        // Cần sửa lại hàm 'updateTradeLog'
+        function updateTradeLog(trades) {
+            tradesList.innerHTML = "";
+            trades.forEach(trade => {
+                const p = document.createElement("p");
+                p.textContent = `[${trade.tType}] ${trade.tStock} x ${trade.tQty} @ ${trade.tPrice.toFixed(2)}`;
+                if (trade.tType === "Buy") p.style.color = 'var(--color-green)';
+                if (trade.tType === "Sell") p.style.color = 'var(--color-red)';
+                tradesList.prepend(p); // Hiển thị lệnh mới nhất lên đầu
+            });
+        }
+        
+        // --- TÍNH NĂNG MỚI ---
+
+        function updateMockOrderBook(currentPrice) {
+            orderBookAsks.innerHTML = "";
+            orderBookBids.innerHTML = "";
+            orderBookPrice.textContent = currentPrice.toFixed(2);
+            orderBookPrice.style.color = 'var(--color-green)';
+            setTimeout(() => { orderBookPrice.style.color = 'var(--text-color)'; }, 500);
+
+            // Tạo 5 lệnh bán (Asks) giả
+            for (let i = 5; i > 0; i--) {
+                const price = currentPrice + (i * 0.1);
+                const amount = Math.random() * 5 + 0.1;
+                const row = document.createElement("tr");
+                row.className = "ask";
+                row.innerHTML = `<td class="price">${price.toFixed(2)}</td><td>${amount.toFixed(3)}</td>`;
+                orderBookAsks.appendChild(row);
+            }
+            // Tạo 5 lệnh mua (Bids) giả
+            for (let i = 1; i <= 5; i++) {
+                const price = currentPrice - (i * 0.1);
+                const amount = Math.random() * 5 + 0.1;
+                const row = document.createElement("tr");
+                row.className = "bid";
+                row.innerHTML = `<td class="price">${price.toFixed(2)}</td><td>${amount.toFixed(3)}</td>`;
+                orderBookBids.appendChild(row);
+            }
+        }
+
+        // === BẮT ĐẦU SỬA LỖI ===
+        // SỬA HÀM sendOrder
+        function sendOrder(orderType) { // ĐỔI TÊN THAM SỐ
+            const stockId = document.getElementById("stock-select").value;
+            
+            // XÓA DÒNG GÂY LỖI (VÌ ĐÃ XÓA DROPDOWN)
+            // const orderType = defaultType || document.getElementById("order-type").value;
+            
+            const qty = parseInt(document.getElementById("order-qty").value, 10);
+
+            if (!qty || qty <= 0) { 
+                alert("Quantity must be greater than 0");
+                return;
+            }
+            // XÓA DẤU ; GÂY LỖI
+            // }; 
+
+            // SỬA LỖI: Gửi JSON theo định dạng "TaggedObject" phẳng
+            // mà backend Haskell (Generic FromJSON) mong đợi.
+            const finalMsg = {
+                "tag": "PlaceOrder",
+                "oStock": stockId,
+                "oType": orderType,
+                "oQty": qty
+            };
+            
+            ws.send(JSON.stringify(finalMsg));
+            console.log("Sent order:", finalMsg);
+        }
+        // === KẾT THÚC SỬA LỖI ===
+        
+        // --- XỬ LÝ LỖI ---
+        ws.onclose = () => {
+            console.log("Disconnected from server");
+            document.body.innerHTML = "<h1>Disconnected from server. Please refresh.</h1>";
+        };
+        ws.onerror = (err) => {
+            console.error("WebSocket Error:", err);
+            document.body.innerHTML = "<h1>WebSocket connection error. Check console.</h1>";
+        };
+    </script>
+</body>
+</html>

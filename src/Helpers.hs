@@ -9,7 +9,8 @@ import Types
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.List (sortOn)
-import Brick (AttrMap, attrMap)
+-- ĐÃ SỬA: Import chính xác
+import Brick.AttrMap (AttrMap, attrMap, attrName)
 import qualified Graphics.Vty as V
 
 data SortMode = ById | ByPriceAsc | ByPriceDesc deriving (Eq, Show)
@@ -24,4 +25,5 @@ attrSelected :: V.Attr
 attrSelected = V.withForeColor V.defAttr V.yellow
 
 attrMapDefault :: AttrMap
-attrMapDefault = attrMap V.defAttr [("selected", attrSelected)]
+-- ĐÃ SỬA: Thêm attrName
+attrMapDefault = attrMap V.defAttr [(attrName "selected", attrSelected)]
